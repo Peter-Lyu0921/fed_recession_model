@@ -1,0 +1,287 @@
+---
+title: "Fed Recession Model"
+output: html_document
+date: '2023-04-11'
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Import packages
+```{r}
+library(tidyverse)
+library(ggplot2)
+library(tidyr)
+library(dplyr)
+library(plotly)
+library(readxl)
+library(magrittr)
+library(class)
+library(MASS)
+library(tree)
+library(randomForest)
+library(gbm)
+library(BART)
+```
+
+
+## Import the data
+```{r}
+spread <- read_excel("allmonth.xls")
+
+sp500 <- read.csv("sp500.csv") %>%
+  set_colnames(c("date", "sp500_value"))
+
+cpi <- read.csv("cpi.csv") %>%
+  set_colnames(c("date", "cpi"))
+
+monetary_base <- read.csv("monetary_base.csv")%>%
+  set_colnames(c("date", "monetary_base"))
+
+m1 <- read.csv("m1_monthly.csv")%>%
+  set_colnames(c("date", "m1"))
+
+m2 <- read.csv("m2_monthly.csv")%>%
+  set_colnames(c("date", "m2"))
+
+m3 <- read.csv("m3_monthly.csv")%>%
+  set_colnames(c("date", "m3"))
+```
+
+
+## Manipulate the data
+```{r}
+## Change to %Y-%M format
+spread$year_month <- format(as.Date(spread$Date), "%Y-%m")
+sp500$year_month <- format(as.Date(sp500$date), "%Y-%m")
+cpi$year_month <- format(as.Date(cpi$date), "%Y-%m")
+monetary_base$year_month <- format(as.Date(monetary_base$date), "%Y-%m")
+m1$year_month <- format(as.Date(m1$date), "%Y-%m")
+m2$year_month <- format(as.Date(m2$date), "%Y-%m")
+m3$year_month <- format(as.Date(m3$date), "%Y-%m")
+
+
+recession_data <- merge(spread, sp500, by = 'year_month') %>%
+  merge(cpi, by = 'year_month')%>%
+  merge(monetary_base, by = 'year_month')%>%
+  merge(m1, by = 'year_month')%>%
+  merge(m2, by = 'year_month')%>%
+  merge(m3, by = 'year_month')%>%
+  set_colnames(c("year_month", "date", "ten_year_t_yield", "three_month_t_yield", "three_month_bond_equivalent", "spread", "rec_prob", "nber_rec", "date.x1", "sp500", "date.y1", "cpi", "date.x2", "monetary_base", "date.y2", "m1", "date.x3", "m2", "date.y3", "m3"))%>%
+  dplyr::select(-c("date.x1", "date.y1", "date.x2", "date.y2", "date.x3", "date.y3", "date"))
+
+
+## Add one_year and one_and_half_year forward recession
+one_year_rec <- rep(NA, nrow(recession_data))
+one_half_year_rec <- rep(NA, nrow(recession_data))
+
+for (i in 1:(nrow(recession_data)-16)) {
+  start_year <- i + 1
+  end_year <- i + 12
+  
+  recesion_in_next_one_year <- sum(recession_data$nber_rec[start_year:end_year])
+  
+  if(recesion_in_next_one_year > 0){
+    one_year_rec[i] <- 1
+  } else {
+    one_year_rec[i] <- 0
+  }
+}
+
+for (i in 1:(nrow(recession_data)-22)) {
+  start_year <- i + 1
+  end_year <- i + 18
+  
+  recesion_in_next_one_half_year <- sum(recession_data$nber_rec[start_year:end_year])
+  
+  if(recesion_in_next_one_half_year > 0){
+    one_half_year_rec[i] <- 1
+  } else {
+    one_half_year_rec[i] <- 0
+  }
+}
+
+recession_data <- cbind(recession_data, one_year_rec) %>%
+  cbind(one_half_year_rec)%>%
+  extract(1:766, )
+
+```
+
+
+## Implement Probit Model 
+```{r}
+one_year_probit <- glm(one_year_rec ~ ten_year_t_yield + three_month_t_yield + spread + sp500 + cpi + monetary_base + m1 + m2 + m3, data = recession_data, family = binomial(link = "probit"))
+one_half_year_probit <- glm(one_half_year_rec ~ ten_year_t_yield + three_month_t_yield + spread + sp500 + cpi + monetary_base + m1 + m2 + m3, data = recession_data, family = binomial(link = "probit"))
+
+one_year_rec_prob <- predict(one_year_probit, type = "response")
+one_half_year_rec_prob <- predict(one_half_year_probit, type = "response")
+
+rec_prob <- cbind(recession_data$year_month, recession_data$rec_prob) %>%
+  cbind(one_year_rec_prob) %>%
+  cbind(one_half_year_rec_prob) %>%
+  set_colnames(c("year_month", "fed_rec_prob", "one_year_rec_prob", "one_half_year_rec_prob"))%>%
+  as.data.frame() %>%
+  mutate(year_month = as.Date(paste(year_month, "-01", sep = ""))) %>%
+  mutate(fed_rec_prob = as.numeric(fed_rec_prob))%>%
+  mutate(one_year_rec_prob = as.numeric(one_year_rec_prob))%>%
+  mutate(one_half_year_rec_prob = as.numeric(one_half_year_rec_prob))
+```
+
+
+## Probit Model Visulation
+```{r}
+fig <- plot_ly(data = rec_prob, x = ~year_month, y = ~fed_rec_prob, name = 'Actual Probability', type = 'scatter', mode = 'lines') %>%
+  add_trace(y = ~one_year_rec_prob, name = 'One Year Probability', mode = 'lines') %>%
+  add_trace(y = ~one_half_year_rec_prob, name = 'One and Half Year Probability', mode = 'lines')
+
+# fig <- layout(fig, title = "Yield Curve Spread", 
+#                      shapes = list(
+#                        type = "rect",
+#                        fillcolor = "red",
+#                        opacity = 0.3,
+#                        x0 = "1970-01-01", x1 = "2022-01-01", xref = "x",
+#                        y0 = 0, y1 = 1, yref = "y"
+#                      ))
+# 
+# 
+fig
+```
+
+
+## Creating Training and Test Set
+```{r}
+training <- sample(1:nrow(recession_data), nrow(recession_data)*(2/3))
+training_set <- recession_data[training,]
+test_set <- recession_data[-training,]
+```
+
+
+## KNN
+```{r}
+features <- c(names(recession_data)[2:5], names(recession_data)[8:13])
+train_x <- training_set[,features]
+test_x <- test_set[,features]
+train_oneyear_y <- training_set[, "one_year_rec"]
+train_onehalfyear_y <- training_set[, "one_half_year_rec"]
+
+set.seed(123)
+
+## One year recession prediction
+one_year_knn_pred <- knn(train_x, test_x, train_oneyear_y, k = 6)
+table(one_year_knn_pred, test_set[, "one_year_rec"])
+mean(one_year_knn_pred == test_set[, "one_year_rec"])
+
+# Cross Validating K
+correct_ratio <- rep(0,20)
+for (i in 1:20) {
+  one_year_knn_pred <- knn(train_x, test_x, train_oneyear_y, k = i)
+  correct_ratio[i] <- mean(one_year_knn_pred == test_set[, "one_year_rec"])
+}
+plot(correct_ratio)
+
+
+## One and half year recession prediction
+one_half_year_knn_pred <- knn(train_x, test_x, train_onehalfyear_y, k = 6)
+table(one_half_year_knn_pred, test_set[, "one_half_year_rec"])
+mean(one_half_year_knn_pred == test_set[, "one_half_year_rec"])
+
+# Cross Validating K
+correct_ratio <- rep(0,20)
+for (i in 1:20) {
+  one_half_year_knn_pred <- knn(train_x, test_x, train_onehalfyear_y, k = i)
+  correct_ratio[i] <- mean(one_half_year_knn_pred == test_set[, "one_half_year_rec"])
+}
+plot(correct_ratio)
+
+## Create KNN Graph
+test_graph <- data.frame(test_set, one_year_knn_pred)
+test_graph$correct <- test_graph$one_year_knn_pred == as.character(test_graph$one_year_rec)
+ggplot(test_graph, aes(y = spread, x = m3, col = one_year_knn_pred, label = correct)) +
+  geom_point(size = 1.5, alpha = 0.2) +
+  geom_point(data = subset(test_graph, correct = FALSE), 
+             aes(y = spread, x = m3, col = one_year_knn_pred, label = correct),
+             size = 1, alpha = 0.8)+
+  theme_bw() + 
+  theme(legend.position = "bottom") +
+  ggtitle("Prediction Results") + 
+  geom_text(size = 2, show.legend = FALSE)
+
+
+```
+
+## Tree Method
+
+```{r}
+tree_fit <- tree(as.factor(one_year_rec) ~ ten_year_t_yield + three_month_t_yield + spread + sp500 + cpi + monetary_base + m1 + m2 + m3, data = training_set)
+tree_pred <- predict(tree_fit,test_set, type = "class")
+table(tree_pred, test_set$one_year_rec)
+mean(tree_pred == test_set$one_year_rec)
+plot(tree_fit)
+text(tree_fit, pretty = 0)
+
+# Conducting CV
+set.seed(1)
+cv_tree_fit <- cv.tree(tree_fit, FUN = prune.misclass)
+cv_result <- data.frame(cv_tree_fit$size, cv_tree_fit$k, cv_tree_fit$dev)%>%
+  set_colnames(c("size", "k", "dev"))
+cv_tree_fit
+ggplot(cv_result, aes(x = size, y = dev)) +
+  geom_point(size = 1.5, alpha = 0.5) +
+  theme_bw()
+
+ggplot(cv_result, aes(x = k, y = dev)) +
+  geom_point(size = 1.5, alpha = 0.5) +
+  theme_bw()
+
+prune_tree <- prune.tree(tree_fit, best = 13)
+plot(prune_tree)
+text(prune_tree, pretty = 0)
+
+prune_tree_pred <- predict(prune_tree, test_set, type = "class")
+table(prune_tree_pred, test_set$one_year_rec)
+mean(prune_tree_pred == test_set$one_year_rec)
+```
+
+## Random Forest
+```{r}
+rf_fit <- randomForest(as.factor(one_year_rec) ~ ten_year_t_yield + three_month_t_yield + spread + sp500 + cpi + monetary_base + m1 + m2 + m3, data = training_set, mtry = 9, ntree = 100, importance = TRUE)
+rf_pred <- predict(rf_fit, newdata = test_set)
+table(rf_pred, test_set$one_year_rec)
+mean(rf_pred == test_set$one_year_rec)
+
+
+rf_fit <- randomForest(as.factor(one_year_rec) ~ ten_year_t_yield + three_month_t_yield + spread + sp500 + cpi + monetary_base + m1 + m2 + m3, data = training_set, mtry = 3, ntree = 100, importance = TRUE)
+rf_pred <- predict(rf_fit, newdata = test_set)
+table(rf_pred, test_set$one_year_rec)
+mean(rf_pred == test_set$one_year_rec)
+varImpPlot(rf_fit)
+```
+
+## Boosting
+```{r}
+set.seed(123)
+boost_fit <- gbm(as.character(one_year_rec) ~ ten_year_t_yield + three_month_t_yield + spread + sp500 + cpi + monetary_base + m1 + m2 + m3, data = training_set, distribution = "bernoulli", n.trees = 1000, interaction.depth = 4)
+boost_fit
+boost_pred <- predict(boost_fit, newdata = test_set, n.trees = 1000)
+boost_pred
+```
+
+## BART
+
+```{r}
+features <- c(names(recession_data)[2:5], names(recession_data)[8:13])
+train_x <- training_set[,features]
+test_x <- test_set[,features]
+train_oneyear_y <- training_set[, "one_year_rec"]
+set.seed(123)
+bart_fit <- pbart(train_x, train_oneyear_y, x.test = test_x)
+bart_fit$prob.test.mean
+
+rec_prob <- data.frame(test_set$year_month, bart_fit$prob.test.mean/1.5, test_set$rec_prob)
+rec_prob
+fig <- plot_ly(data = rec_prob, x = ~test_set.year_month, y = ~test_set.rec_prob, name = 'Actual Probability', type = 'scatter', mode = 'lines') %>%
+  add_trace(y = ~bart_fit.prob.test.mean.1.5, name = 'One Year Probability', mode = 'lines')
+fig
+```
+
